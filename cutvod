@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+
+# This script is used to download a portion of a Twitch VOD.
+# The user provides a Twitch VOD URL, a start time, and an end time or a duration, respectively. The script will first fetch the VOD's metadata to suggest a filename consisting of the Twitch usersname and the title of the VOD. Once the user enters start and end point, the script will download only the specified portion of the VOD.
+
+# Version 3.0
+
+# Dependencies: streamlink, ffmpeg, yt-dlp, jq
+
+
+### Variables
+
+videourl="xxx"
+filename="xxx"
+startposition="xxx"
+endposition="xxx"
+duration="xxx"
+mode="duration"
+resolution="xxx"
+
+ism3u8="false"
+
+
+### Functions
+
+## define select menu function
+# source: https://unix.stackexchange.com/questions/146570/arrow-key-enter-menu
+
+# shellcheck disable=SC1087,SC2059,SC2034,SC2162,SC2086,SC2162,SC2155,SC2006,SC2004
+function select_option {
+
+    # little helpers for terminal print control and key input
+    ESC=$( printf "\033")
+    cursor_blink_on()  { printf "$ESC[?25h"; }
+    cursor_blink_off() { printf "$ESC[?25l"; }
+    cursor_to()        { printf "$ESC[$1;${2:-1}H"; }
+    print_option()     { printf "   $1 "; }
+    print_selected()   { printf "  $ESC[7m $1 $ESC[27m"; }
+    get_cursor_row()   { IFS=';' read -sdR -p $'\E[6n' ROW COL; echo ${ROW#*[}; }
+    key_input()        { read -s -n3 key 2>/dev/null >&2
+                         if [[ $key = $ESC[A ]]; then echo up;    fi
+                         if [[ $key = $ESC[B ]]; then echo down;  fi
+                         if [[ $key = ""     ]]; then echo enter; fi; }
+
+    # initially print empty new lines (scroll down if at bottom of screen)
+    for opt; do printf "\n"; done
+
+    # determine current screen position for overwriting the options
+    
+    local lastrow=`get_cursor_row`
+    local startrow=$(($lastrow - $#))
+
+    # ensure cursor and input echoing back on upon a ctrl+c during read -s
+    trap "cursor_blink_on; stty echo; printf '\n'; exit" 2
+    cursor_blink_off
+
+    local selected=0
+    while true; do
+        # print options by overwriting the last lines
+        local idx=0
+        for opt; do
+            cursor_to $(($startrow + $idx))
+            if [ $idx -eq $selected ]; then
+                print_selected "$opt"
+            else
+                print_option "$opt"
+            fi
+            ((idx++))
+        done
+
+        # user key control
+        case `key_input` in
+            enter) break;;
+            up)    ((selected--));
+                   if [ $selected -lt 0 ]; then selected=$(($# - 1)); fi;;
+            down)  ((selected++));
+                   if [ $selected -ge $# ]; then selected=0; fi;;
+        esac
+    done
+
+    # cursor position back to normal
+    cursor_to $lastrow
+    printf "\n"
+    cursor_blink_on
+
+    return $selected
+}
+
+
+### Main code
+
+echo -e "\n\e[1;94mTwitch Stream URL: \e[0m"
+read -rep $'\e[1;94m> \e[0m' videourl
+
+# check if input is a m3u8 file
+if [[ $videourl == *"m3u8" ]]; then
+    ism3u8="true"
+fi
+
+echo -e "\n\e[1;94mOutput Filename: \e[0m"
+
+    # if input is not a m3u8 file, suggest a filename based on the streamer name; otherwise extract the steamer name from the m3u8 url
+    if [[ $ism3u8 == "false" ]]; then
+        echo -ne "\e[94mRetrieving streamer name...\e[0m"
+        twitchstreamer="$(yt-dlp -j $videourl | jq -r '.uploader' | tr -s ' ' | tr ' ' '_')"
+        echo -ne "\r\033[K"
+        echo -ne "\e[94mRetrieving stream title...\e[0m"
+        vodtitle="$(yt-dlp -j $videourl | jq -r '.title' | cut -c1-50 | sed 's/[\.,#<>☆:!?//]//g' | tr -s ' ' | tr ' ' '_')"
+        echo -ne "\r\033[K"
+        suggestedfilename="${twitchstreamer}_${vodtitle}"
+    else
+        # from video url, extract the part between the first and second underscore
+        suggestedfilename="$(echo $videourl | cut -d'_' -f2)"
+    fi
+
+read -rep $'\e[1;94m> \e[0m' -i "$suggestedfilename" filename
+
+echo -e "\n\e[1;94mEnter Start Position: \e[0m"
+read -rep $'\e[1;94m> \e[0m' -i "00:00:00" startposition
+
+
+echo -e "\n\e[1;94mUse Duration or End Position as second parameter?\e[0m"
+
+modeoptions=("Duration" "End Position")
+select_option "${modeoptions[@]}"
+modechoice=$?
+
+if [[ "${modeoptions[$modechoice]}" == "Duration" ]]
+then
+	
+	mode="duration"
+
+	echo -e "\e[1;94mEnter Clip Duration: \e[0m"
+        if [[ $ism3u8 == "false" ]]; then
+            echo -ne "\e[94mRetrieving stream duration...\e[0m"
+            SECONDS="$(yt-dlp -j $videourl | jq -r '.duration' | tr -s ' ' | tr ' ' '_')"
+            echo -ne "\r\033[K"
+            echo -e "\e[0;94mDuration of the entire stream: $(printf "%02d:%02d:%02d" $((SECONDS/3600)) $((SECONDS%3600/60)) $((SECONDS%60)))\e[0m"
+        fi
+	read -rep $'\e[1;94m> \e[0m' -i "00:00:00" duration
+
+elif [[ "${modeoptions[$modechoice]}" == "End Position" ]]
+then
+	
+	mode="endposition"
+
+	echo -e "\e[1;94mEnter End Position: \e[0m"
+        if [[ $ism3u8 == "false" ]]; then
+            echo -ne "\e[94mRetrieving stream duration...\e[0m"
+            SECONDS="$(yt-dlp -j $videourl | jq -r '.duration' | tr -s ' ' | tr ' ' '_')"
+            echo -ne "\r\033[K"
+            echo -e "\e[0;94mDuration of the entire stream: $(printf "%02d:%02d:%02d" $((SECONDS/3600)) $((SECONDS%3600/60)) $((SECONDS%60)))\e[0m"
+        fi
+	read -rep $'\e[1;94m> \e[0m' -i "00:00:00" endposition
+
+fi
+
+
+if [[ $ism3u8 == "false" ]]; then
+
+    echo -e "\n\e[1;94mVideo Resolution:\e[0m"
+        echo -ne "\e[94mRetrieving available resolutions...\e[0m"
+        # get available formats and their approx. file sizes from Twitch JSON output, remove the storyboards sb0 and sb1 from the list, convert file sizes from bytes to GB, add brackets and "GB" around the file sizes, rename "Audio_Only" to "audio", lastly replace tabs with spaces and convert newlines to ", "
+        availableresolutions=$(yt-dlp -j $videourl | jq -r '.formats[] |  select(.format_id != "sb0" and .format_id != "sb1") | [.format_id, (.filesize_approx/1024/1024/1024 | tostring | split(".") | "(" + .[0]  + "." + .[1][0:2] + " GB)")] | @tsv' | sed 's/Audio_Only/audio/g' | sed 's/\t/ /g' | gsed ':a;N;$!ba;s/\n/, /g')
+        echo -ne "\r\033[K"
+        echo -e "\e[0;94m$availableresolutions\e[0m"
+    read -rep $'\e[1;94m> \e[0m' -i "best" resolution
+
+fi
+
+
+echo -e "\n\n"
+
+
+if [[ $ism3u8 == "false" ]]; then
+
+    if [[ "$mode" == "duration" ]]
+    then
+
+        ffmpeg -hide_banner -ss "$startposition" -t "$duration" -i "$(streamlink --stream-url $videourl $resolution --player-passthrough=hls)" -c copy "$filename.mp4"
+
+    elif [[ "$mode" == "endposition" ]]
+    then
+
+        ffmpeg -hide_banner -ss "$startposition" -to "$endposition" -i "$(streamlink --stream-url $videourl $resolution --player-passthrough=hls)" -c copy "$filename.mp4"
+
+    fi
+
+else
+
+    if [[ "$mode" == "duration" ]]
+    then
+
+        ffmpeg -hide_banner -ss "$startposition" -t "$duration" -i "$videourl" -c copy "$filename.mp4"
+
+    elif [[ "$mode" == "endposition" ]]
+    then
+
+        ffmpeg -hide_banner -ss "$startposition" -to "$endposition" -i "$videourl" -c copy "$filename.mp4"
+
+    fi
+
+fi
+
+
+exit 0
+
